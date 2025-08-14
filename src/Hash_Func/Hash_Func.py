@@ -86,7 +86,7 @@ def _get_u0_u1_gates(n: int, t1: float, t2: float) -> tuple[UnitaryGate, Unitary
 
 def ctqw_hash(
   bits: Iterable[int] | str,
-  n: int = 15,                 # paper uses n=15
+  n: int = 16,                 # paper uses n=15
   t1: float = np.pi,           # paper uses t = π
   t2: float = np.pi,           # paper uses t = π
   k_bits: int = 12,            # 12 bits per vertex → 180-bit digest
@@ -153,7 +153,7 @@ def ctqw_hash(
 
 # ---------- circuit drawing (optional) ---------------------------------------
 
-def build_ctqw_circuit(bits: str | list[int], n: int = 15, t1: float = np.pi, t2: float = np.pi) -> QuantumCircuit:
+def build_ctqw_circuit(bits: str | list[int], n: int = 16, t1: float = np.pi, t2: float = np.pi) -> QuantumCircuit:
   """Build the CTQW circuit (one block per bit)."""
   if isinstance(bits, str):
     bitstr = ''.join('1' if b in ('1', 'True', 'true') else '0' for b in bits)
@@ -167,7 +167,7 @@ def build_ctqw_circuit(bits: str | list[int], n: int = 15, t1: float = np.pi, t2
   return qc
 
 def save_hash_circuit_png(bits: str | list[int], out_path: str = "./fig/hash_circuit.png",
-                          n: int = 15, t1: float = np.pi, t2: float = np.pi,
+                          n: int = 16, t1: float = np.pi, t2: float = np.pi,
                           fold_cols: int = 120, dpi: int = 300) -> str:
   """Render the circuit diagram to a PNG file."""
   import matplotlib.pyplot as plt
@@ -198,8 +198,8 @@ def flip_one_bit(bitstr: str, pos: int) -> str:
 # ---------- Experiment A: Full digest-collision search ----------------------
 
 def run_full_collision_search(
-  iterations: int = 1000,
-  n: int = 15, t1: float = np.pi, t2: float = np.pi, k_bits: int = 12,
+  iterations: int = 10000,
+  n: int = 16, t1: float = np.pi, t2: float = np.pi, k_bits: int = 12,
   msg_len_min: int = 64, msg_len_max: int = 128,
   out_csv: str = "./run/hash_values.csv",
   seed: int | None = 42,
@@ -241,7 +241,7 @@ def run_full_collision_search(
 
 def run_omega_test_flip_one_bit(
   iterations: int = 1000,
-  n: int = 15, t1: float = np.pi, t2: float = np.pi, k_bits: int = 12,
+  n: int = 16, t1: float = np.pi, t2: float = np.pi, k_bits: int = 12,
   base_msg_len: int = 128,
   out_csv: str = "./run/omega_test.csv",
   seed: int | None = 123,
@@ -297,7 +297,7 @@ def run_omega_test_flip_one_bit(
 
 def run_statistical_analysis(
   iterations: int = 25000,          # η
-  n: int = 15, t1: float = np.pi, t2: float = np.pi, k_bits: int = 12,
+  n: int = 16, t1: float = np.pi, t2: float = np.pi, k_bits: int = 12,
   base_msg_len: int = 128,          # message length used for flip-one-bit
   out_csv: str = "./run/stats.csv",
   seed: int | None = 321,
@@ -373,13 +373,13 @@ def run_statistical_analysis(
 if __name__ == "__main__":
   # Example single hash (unchanged)
   message_bits = "01101010011010"
-  out = ctqw_hash(bits=message_bits, n=15, t1=np.pi, t2=np.pi, k_bits=12)
+  out = ctqw_hash(bits=message_bits, n=16, t1=np.pi, t2=np.pi, k_bits=12)
   print("Total bits:", len(out['binary']))     # 180
   print("Hex digest:", out['hex'])
   print("Groups (12 bits each):", ' '.join(out['groups_hex_3']))
 
   # Save circuit figure
-  saved = save_hash_circuit_png(message_bits, "./fig/hash_circuit.png", n=15, t1=np.pi, t2=np.pi)
+  saved = save_hash_circuit_png(message_bits, "./fig/hash_circuit.png", n=16, t1=np.pi, t2=np.pi)
   print("Saved circuit to:", saved)
 
   # ---- Collision experiments ----
@@ -388,7 +388,7 @@ if __name__ == "__main__":
   # A) Full digest-collision search (classical)
   summary_full = run_full_collision_search(
     iterations=iters,
-    n=15, t1=np.pi, t2=np.pi, k_bits=12,
+    n=16, t1=np.pi, t2=np.pi, k_bits=12,
     msg_len_min=64, msg_len_max=128,
     out_csv="./run/hash_values.csv",
     seed=42,
@@ -404,7 +404,7 @@ if __name__ == "__main__":
   # B) Paper-style ω test (flip one bit)
   summary_omega = run_omega_test_flip_one_bit(
     iterations=iters,
-    n=15, t1=np.pi, t2=np.pi, k_bits=12,
+    n=16, t1=np.pi, t2=np.pi, k_bits=12,
     base_msg_len=128,
     out_csv="./run/omega_test.csv",
     seed=123,
@@ -421,7 +421,7 @@ if __name__ == "__main__":
   # C) Statistical analysis (Sec. 3.2)
   stats = run_statistical_analysis(
     iterations=iters,                 # η
-    n=15, t1=np.pi, t2=np.pi, k_bits=12,
+    n=16, t1=np.pi, t2=np.pi, k_bits=12,
     base_msg_len=128,
     out_csv="./run/stats.csv",
     seed=321,
