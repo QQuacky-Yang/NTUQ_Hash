@@ -1,21 +1,27 @@
 # tabs = 2 spaces
 """
 CTQW hash in pure math using the paper's quantization:
-  vals_i = floor(p_i * 20000) % 2^k  (k=12 by default)
+  vals_i = floor(p_i * scale) % 2^k
 
-Includes:
-- ctqw_hash(bits: str, n=15, t1=pi, t2=pi, k=12, scale=20000) -> uppercase hex digest
-- collision_test(...): strict full-digest equality under 1-bit flip (should be ~0%)
-- run_omega_test_flip_one_bit(...): ω histogram (per-vertex chunk equality)
-- run_statistical_analysis(...): β̄, ᾱ, p, Δβ, Δp (paper Sec. 3.2)
+IMPORTANT in this version:
+- You can set n and k freely.
+- The ALGORITHM OUTPUT is truncated to the FIRST 256 BITS only if n*k > 256.
+  If n*k <= 256, the algorithm outputs ALL n*k bits.
+- All analyses (collision, ω, β̄, p, Δβ, Δp) operate on the digest as produced
+  by the algorithm, i.e., N_eval = min(n*k, 256).
+- ᾱ is dropped (depends on per-vertex k-bit chunks, not meaningful post-truncation).
+
+Demo uses n=31 per instructor suggestion.
 """
 
 from __future__ import annotations
 import os
 import csv
+import math
 import random
 import numpy as np
 
+# Optional SciPy for faster expm
 try:
   from scipy.linalg import expm
   _HAS_SCIPY = True
@@ -50,21 +56,24 @@ def _unitary_from_hermitian(H: np.ndarray, t: float) -> np.ndarray:
 # ---------- hash (paper quantization) ----------------------------------------
 
 def ctqw_hash(bits: str, n: int = 15, t1: float = np.pi, t2: float = np.pi,
-              k: int = 12, scale: int = 20000) -> str:
+              k: int = 12, scale: int = 20000, keep_bits_max: int = 256) -> str:
   """
   Continuous-Time Quantum Walk hash (matrix-only) returning an UPPERCASE hex digest.
-  Probability quantization follows the paper: floor(p * scale) % 2^k, default scale=20000.
+  The algorithm outputs ONLY the first 256 bits if n*k > 256; otherwise all n*k bits.
+
+  Probability quantization: floor(p * scale) % 2^k.
 
   Args:
     bits:  bitstring message, e.g. "101001..."
     n:     number of vertices in P_n
     t1:    evolution time for A (usually π)
     t2:    evolution time for L (usually π)
-    k:     bits per vertex (total digest length = n * k)
-    scale: scaling factor before modulo (paper uses 20000)
+    k:     bits per vertex before any truncation (full output length = n * k)
+    scale: scaling factor before modulo (paper uses ~20000)
+    keep_bits_max: hard cap for output length (default 256)
 
   Returns:
-    Uppercase hex string of length ceil(n*k/4).
+    Uppercase hex string; length = ceil(min(n*k, keep_bits_max)/4), zero-padded to preserve leading zeros.
   """
   # Build A and L
   A = _path_adjacency(n)
@@ -87,13 +96,21 @@ def ctqw_hash(bits: str, n: int = 15, t1: float = np.pi, t2: float = np.pi,
   s = probs.sum()
   probs = probs / s if s != 0 else probs
 
-  # Paper quantization: floor(p * scale) % 2^k
+  # Paper quantization: floor(p * scale) % 2^k  → integers in [0, 2^k-1]
   K = 1 << k
-  vals = (np.floor(probs * scale).astype(int)) % K  # integers in [0, 2^k-1]
+  vals = (np.floor(probs * scale).astype(int)) % K
 
-  # Concatenate k-bit chunks and convert to uppercase hex without "0x"
-  binary_out = ''.join(format(v, f'0{k}b') for v in vals)
-  hex_out = hex(int(binary_out, 2))[2:].upper()
+  # Concatenate k-bit chunks
+  full_bits = ''.join(format(v, f'0{k}b') for v in vals)  # length = n*k
+  total_bits_full = len(full_bits)
+
+  # Keep only up to keep_bits_max if longer; else keep all
+  keep_bits_used = min(total_bits_full, keep_bits_max)
+  kept = full_bits[:keep_bits_used]
+
+  # Convert to fixed-length hex (preserving leading zeros)
+  hex_len = (keep_bits_used + 3) // 4
+  hex_out = hex(int(kept or '0', 2))[2:].upper().zfill(hex_len)
   return hex_out
 
 
@@ -110,46 +127,36 @@ def flip_one_bit(bitstr: str, pos: int) -> str:
   b[pos] = '1' if b[pos] == '0' else '0'
   return ''.join(b)
 
-def _hex_to_bits(hex_str: str, total_bits: int) -> str:
-  """Hex → binary string, left-padded to total_bits."""
+def _hex_to_bits_fixed(hex_str: str, total_bits: int) -> str:
+  """Hex → binary string, left-padded to exactly total_bits."""
   bs = bin(int(hex_str, 16))[2:]
   return bs.zfill(total_bits)
-
-def _chunk_ints_from_hex(hex_str: str, n: int, k: int) -> list[int]:
-  """Recover per-vertex integers from the hex digest (inverse of the concat)."""
-  bits = _hex_to_bits(hex_str, total_bits=n * k)
-  return [int(bits[i * k:(i + 1) * k], 2) for i in range(n)]
-
-def _hamming_bits_from_hex(h1: str, h2: str, total_bits: int) -> int:
-  b1 = _hex_to_bits(h1, total_bits)
-  b2 = _hex_to_bits(h2, total_bits)
-  return sum(x != y for x, y in zip(b1, b2))
 
 
 # ---------- experiment: strict 1-bit-flip full collision --------------------
 
 def collision_test(trials: int = 10000, msg_len: int = 12,
                    n: int = 15, t1: float = np.pi, t2: float = np.pi,
-                   k: int = 12, scale: int = 20000) -> None:
+                   k: int = 12, scale: int = 20000, keep_bits_max: int = 256) -> None:
   """
-  Strict 1-bit-flip collision test:
-  Draw random bitstrings of length msg_len, flip one random bit, and check if
-  full hex digests are identical (h(m) == h(m')). Prints collision rate.
+  Strict 1-bit-flip collision test on the algorithm's digest:
+  the digest length is N_eval = min(n*k, keep_bits_max).
   """
   collisions = 0
+  N_eval = min(n * k, keep_bits_max)
   for _ in range(trials):
     bits = ''.join(random.choice('01') for _ in range(msg_len))
-    h1 = ctqw_hash(bits, n=n, t1=t1, t2=t2, k=k, scale=scale)
+    h1 = ctqw_hash(bits, n=n, t1=t1, t2=t2, k=k, scale=scale, keep_bits_max=keep_bits_max)
     pos = random.randrange(len(bits))
     flipped_bits = bits[:pos] + ('1' if bits[pos] == '0' else '0') + bits[pos+1:]
-    h2 = ctqw_hash(flipped_bits, n=n, t1=t1, t2=t2, k=k, scale=scale)
+    h2 = ctqw_hash(flipped_bits, n=n, t1=t1, t2=t2, k=k, scale=scale, keep_bits_max=keep_bits_max)
     if h1 == h2:
       collisions += 1
   rate = collisions / trials * 100.0
-  print(f"Total tests: {trials}, Collisions: {collisions}, Collision rate: {rate:.4f}%")
+  print(f"Total tests: {trials}, Collisions: {collisions}, Collision rate (on {N_eval} bits): {rate:.4f}%")
 
 
-# ---------- experiment: ω test (paper Sec. 3.5) -----------------------------
+# ---------- ω test (block-wise on the digest, with tail support) ------------
 
 def run_omega_test_flip_one_bit(
   iterations: int = 1000,
@@ -158,13 +165,20 @@ def run_omega_test_flip_one_bit(
   out_csv: str | None = "./run/omega_test.csv",
   seed: int | None = 123,
   scale: int = 20000,
+  keep_bits_max: int = 256,
+  block_bits: int = 16,   # block size in bits; tail (< block_bits) is also compared
 ) -> dict:
   """
-  Flip one random input bit, hash both, and count ω = number of equal per-vertex k-bit chunks
-  at the same positions. Report ω=0,1,2 counts and the rate of ω≥1.
+  Flip one random input bit, hash both (algorithm caps to min(n*k, keep_bits_max)),
+  split the digest into floor(N_eval/block_bits) full blocks, and (optionally) ONE
+  tail block with size N_eval % block_bits. ω counts equal blocks at same positions,
+  INCLUDING the leftover tail as a mini-block when tail_bits > 0.
   """
+  assert block_bits > 0, "block_bits must be positive"
   rng = _rng(seed)
   omega_counts: dict[int, int] = {}
+  N_eval = min(n * k, keep_bits_max)
+
   if out_csv is not None:
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
     f = open(out_csv, "w", newline="")
@@ -174,17 +188,33 @@ def run_omega_test_flip_one_bit(
     f = None
     w = None
 
+  num_blocks_full = N_eval // block_bits
+  tail_bits = N_eval - num_blocks_full * block_bits
+
   for t in range(iterations):
     m1 = random_bits(base_msg_len, rng)
     pos = int(rng.integers(0, base_msg_len))
     m2 = flip_one_bit(m1, pos)
 
-    h1 = ctqw_hash(m1, n=n, t1=t1, t2=t2, k=k, scale=scale)
-    h2 = ctqw_hash(m2, n=n, t1=t1, t2=t2, k=k, scale=scale)
+    h1 = ctqw_hash(m1, n=n, t1=t1, t2=t2, k=k, scale=scale, keep_bits_max=keep_bits_max)
+    h2 = ctqw_hash(m2, n=n, t1=t1, t2=t2, k=k, scale=scale, keep_bits_max=keep_bits_max)
 
-    v1 = _chunk_ints_from_hex(h1, n=n, k=k)
-    v2 = _chunk_ints_from_hex(h2, n=n, k=k)
-    omega = sum(1 for a, b in zip(v1, v2) if a == b)
+    b1 = _hex_to_bits_fixed(h1, N_eval)
+    b2 = _hex_to_bits_fixed(h2, N_eval)
+
+    omega = 0
+    # Compare full blocks
+    for i in range(num_blocks_full):
+      a = b1[i*block_bits:(i+1)*block_bits]
+      b = b2[i*block_bits:(i+1)*block_bits]
+      if a == b:
+        omega += 1
+    # Compare leftover tail mini-block, if any
+    # if tail_bits > 0:
+    #   a_tail = b1[num_blocks_full*block_bits:N_eval]
+    #   b_tail = b2[num_blocks_full*block_bits:N_eval]
+    #   if a_tail == b_tail:
+    #     omega += 1
 
     omega_counts[omega] = omega_counts.get(omega, 0) + 1
     if w:
@@ -207,10 +237,14 @@ def run_omega_test_flip_one_bit(
     "omega2": omega2,
     "collision_rate_percent": collision_rate,
     "csv": out_csv,
+    "num_blocks_full": num_blocks_full,
+    "tail_bits": tail_bits,
+    "block_bits": block_bits,
+    "keep_bits_used": N_eval,
   }
 
 
-# ---------- experiment: statistical analysis (paper Sec. 3.2) ---------------
+# ---------- experiment: statistical analysis on the digest -------------------
 
 def run_statistical_analysis(
   iterations: int = 25000,          # η
@@ -219,27 +253,25 @@ def run_statistical_analysis(
   out_csv: str | None = "./run/stats.csv",
   seed: int | None = 321,
   scale: int = 20000,
+  keep_bits_max: int = 256,
 ) -> dict:
   """
-  Compute:
-    β̄  : mean changed bit number (Hamming distance between full n*k-bit digests)
-    ᾱ  : mean added zeros to reach fixed k bits per vertex
-    p   : mean changed probability (%) = (β̄ / (n*k)) * 100
-    Δβ  : std of changed bit number (sample)
-    Δp  : std of changed probability (%) (sample)
+  Compute on the algorithm's digest (length N_eval = min(n*k, keep_bits_max)):
+    β̄  : mean changed bit number (Hamming on N_eval bits)
+    p   : mean changed probability (%) = (β̄ / N_eval) * 100
+    Δβ  : std of changed bit number (sample) on N_eval
+    Δp  : std of changed probability (%) (sample) on N_eval
   Each trial flips one random input bit; we compare the two digests.
   """
   rng = _rng(seed)
-  total_bits = n * k
-
+  N_eval = min(n * k, keep_bits_max)
   betas: list[int] = []
-  alphas: list[int] = []
 
   if out_csv is not None:
     os.makedirs(os.path.dirname(out_csv), exist_ok=True)
     f = open(out_csv, "w", newline="")
     w = csv.writer(f)
-    w.writerow(["trial", "msg_len", "flip_pos", "beta", "alpha", "p_percent"])
+    w.writerow(["trial", "msg_len", "flip_pos", "beta", "p_percent"])
   else:
     f = None
     w = None
@@ -249,34 +281,30 @@ def run_statistical_analysis(
     pos = int(rng.integers(0, base_msg_len))
     m2 = flip_one_bit(m1, pos)
 
-    h1 = ctqw_hash(m1, n=n, t1=t1, t2=t2, k=k, scale=scale)
-    h2 = ctqw_hash(m2, n=n, t1=t1, t2=t2, k=k, scale=scale)
+    h1 = ctqw_hash(m1, n=n, t1=t1, t2=t2, k=k, scale=scale, keep_bits_max=keep_bits_max)
+    h2 = ctqw_hash(m2, n=n, t1=t1, t2=t2, k=k, scale=scale, keep_bits_max=keep_bits_max)
 
-    # β_j: Hamming distance between full digests
-    beta_j = _hamming_bits_from_hex(h1, h2, total_bits=total_bits)
+    b1 = _hex_to_bits_fixed(h1, N_eval)
+    b2 = _hex_to_bits_fixed(h2, N_eval)
+
+    beta_j = sum(x != y for x, y in zip(b1, b2))
     betas.append(beta_j)
 
-    # α_j: “added zeros” if each vertex value were stored minimally then padded to k bits.
-    vals2 = _chunk_ints_from_hex(h2, n=n, k=k)   # use modified hash side
-    alpha_j = sum(max(0, k - max(1, v.bit_length())) for v in vals2)
-    alphas.append(alpha_j)
-
     if w:
-      p_j = (beta_j / total_bits) * 100.0
-      w.writerow([t, base_msg_len, pos, beta_j, alpha_j, p_j])
+      p_j = (beta_j / N_eval) * 100.0 if N_eval else 0.0
+      w.writerow([t, base_msg_len, pos, beta_j, p_j])
 
   if f:
     f.close()
 
   # Means
   beta_mean = float(np.mean(betas)) if betas else 0.0
-  alpha_mean = float(np.mean(alphas)) if alphas else 0.0
-  p_mean_percent = (beta_mean / total_bits) * 100.0
+  p_mean_percent = (beta_mean / N_eval) * 100.0 if N_eval else 0.0
 
   # Sample std (η-1 in denominator)
   if len(betas) >= 2:
     delta_beta = float(np.std(betas, ddof=1))
-    p_trials = [(b / total_bits) * 100.0 for b in betas]
+    p_trials = [(b / N_eval) * 100.0 for b in betas] if N_eval else [0.0 for _ in betas]
     delta_p_percent = float(np.std(p_trials, ddof=1))
   else:
     delta_beta = 0.0
@@ -284,55 +312,87 @@ def run_statistical_analysis(
 
   return {
     "iterations": iterations,
-    "beta_mean": beta_mean,                 # β̄
-    "alpha_mean": alpha_mean,               # ᾱ
-    "p_mean_percent": p_mean_percent,       # p
-    "delta_beta": delta_beta,               # Δβ
-    "delta_p_percent": delta_p_percent,     # Δp
+    "beta_mean": beta_mean,           # β̄ on N_eval bits
+    "p_mean_percent": p_mean_percent, # p on N_eval bits
+    "delta_beta": delta_beta,         # Δβ
+    "delta_p_percent": delta_p_percent, # Δp
+    "eval_bits_used": N_eval,
     "csv": out_csv,
   }
+
+
+# ---------- pretty printers --------------------------------------------------
+
+def print_stats_report(stats: dict, *, N_eval_bits: int) -> None:
+  """
+  Pretty-print the 4 metrics with binomial baselines on a fixed-length slice.
+  """
+  N = N_eval_bits
+  ideal_beta       = N / 2.0
+  ideal_sigma_beta = math.sqrt(N * 0.5 * 0.5)
+  ideal_p          = 50.0
+  ideal_delta_p    = (ideal_sigma_beta / N) * 100.0
+
+  print(f"η (trials): {stats['iterations']}")
+  print(f"N_eval (digest bits used): {N}")
+  print(f"β̄ (mean changed bits): {stats['beta_mean']:.3f}  [ideal≈{ideal_beta:.1f}]")
+  print("   ⤷ higher→better up to N/2.")
+  print(f"p (mean changed probability %): {stats['p_mean_percent']:.3f}%  [ideal≈{ideal_p:.1f}%]")
+  print("   ⤷ closer to 50% is better.")
+  print(f"Δβ (std of changed bits): {stats['delta_beta']:.3f}  [ideal≈{ideal_sigma_beta:.2f}]")
+  print("   ⤷ lower→more consistent avalanche.")
+  print(f"Δp (std of changed probability %): {stats['delta_p_percent']:.3f}%  [ideal≈{ideal_delta_p:.2f}%]")
+  print("   ⤷ lower→more consistent % change.")
+
+def print_omega_report(omega: dict) -> None:
+  """Pretty-print ω test on fixed-size blocks with tail support."""
+  print("\n[Block-wise ω test on digest]")
+  print(f"Iterations: {omega['iterations']}")
+  print(f"keep_bits_used: {omega['keep_bits_used']}  |  block_bits: {omega['block_bits']}")
+  print(f"#full blocks: {omega['num_blocks_full']}  |  tail_bits: {omega['tail_bits']}")
+  print(f"ω histogram: {omega['omega_hist']}")
+  print(f"Counts → ω=0: {omega['omega0']},  ω=1: {omega['omega1']},  ω=2: {omega['omega2']}")
+  print(f"“Collision rate” % (ω ≥ 1): {omega['collision_rate_percent']:.3f}")
+  print("   ⤷ lower→better; local block-similarity check, not a full digest collision.")
 
 
 # ---------- demo / CLI -------------------------------------------------------
 
 if __name__ == "__main__":
-  # Baseline params (paper)
-  n = 15
+  # Baseline params (with n=31 per instructor; algorithm returns min(n*k, 256) bits)
+  iters = 1000
+  n = 31
   k = 12
-  scale = 20000
+  CAP = 256
+  scale = (2**k) * n
   msg_bits = "101001001011"
 
   # Single hash
-  h = ctqw_hash(msg_bits, n=n, t1=np.pi, t2=np.pi, k=k, scale=scale)
-  print(f"Total bits = {n*k}=180 when n=15,k=12")
-  print("HEX (45 hex chars when n=15,k=12):")
+  h = ctqw_hash(msg_bits, n=n, t1=np.pi, t2=np.pi, k=k, scale=scale, keep_bits_max=CAP)
+  print(f"Algorithm digest bits = min(n*k, {CAP}) = {min(n*k, CAP)} (hex length = {(min(n*k, CAP)+3)//4})")
+  print("HEX:")
   print(h)
 
-  # Strict 1-bit-flip full-collision test (should be ~0%)
-  collision_test(trials=10000, msg_len=len(msg_bits), n=n, t1=np.pi, t2=np.pi, k=k, scale=scale)
+  # Strict 1-bit-flip collision test on the digest
+  collision_test(trials=iters, msg_len=len(msg_bits), n=n, t1=np.pi, t2=np.pi,
+                 k=k, scale=scale, keep_bits_max=CAP)
 
-  # ω test (paper Sec. 3.5)
+  # ω test on the digest with tail comparison enabled (always on here)
   omega = run_omega_test_flip_one_bit(
-    iterations=1000, n=n, t1=np.pi, t2=np.pi, k=k,
-    base_msg_len=128, out_csv="./run/omega_test.csv", seed=123, scale=scale
+    iterations=iters, n=n, t1=np.pi, t2=np.pi, k=k,
+    base_msg_len=128, out_csv="./run/omega_test.csv", seed=123, scale=scale,
+    keep_bits_max=CAP, block_bits=k
   )
-  print("\n[Paper-style ω test]")
-  print("Iterations:", omega["iterations"])
-  print("ω histogram:", omega["omega_hist"])
-  print("Counts → ω=0:", omega["omega0"], "ω=1:", omega["omega1"], "ω=2:", omega["omega2"])
-  print("“Collision rate” (ω ≥ 1) %:", round(omega["collision_rate_percent"], 3))
+  print_omega_report(omega)
   print("CSV:", omega["csv"])
 
-  # Statistical analysis (Sec. 3.2)
+  # Statistical analysis on the digest
   stats = run_statistical_analysis(
-    iterations=1000, n=n, t1=np.pi, t2=np.pi, k=k,
-    base_msg_len=128, out_csv="./run/stats.csv", seed=321, scale=scale
+    iterations=iters, n=n, t1=np.pi, t2=np.pi, k=k,
+    base_msg_len=128, out_csv="./run/stats.csv", seed=321, scale=scale,
+    keep_bits_max=CAP,
   )
-  print("\n[Statistical analysis]")
-  print("η:", stats["iterations"])
-  print("β̄ (mean changed bits):", round(stats["beta_mean"], 3))
-  print("ᾱ (mean added zeros):", round(stats["alpha_mean"], 3))
-  print("p (mean changed probability %):", round(stats["p_mean_percent"], 3))
-  print("Δβ (std of changed bits):", round(stats["delta_beta"], 3))
-  print("Δp (std of changed probability %):", round(stats["delta_p_percent"], 3))
+  print("\n[Statistical analysis on digest]")
+  print_stats_report(stats, N_eval_bits=stats["eval_bits_used"])
   print("CSV:", stats["csv"])
+  print()
