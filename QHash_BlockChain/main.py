@@ -1,17 +1,33 @@
 # main.py
+
+import time
+import os
 from blockchain import Blockchain
 
-# Create blockchain
-bc = Blockchain()
+LOG_FILE = "logs/honest.log"
 
-# Add blocks
-bc.add_block("Alice sends 1 BTC to Bob")
-bc.add_block("Charlie sends 2 BTC to Alice")
-bc.add_block("Miner reward: 6.25 BTC")
+def log(msg):
+    with open(LOG_FILE, "a") as f:
+        f.write(f"[{time.ctime()}] {msg}\n")
+    print(msg)
 
-# Print chain
-for block in bc.chain:
-    print(block)
+if __name__ == "__main__":
+    os.makedirs("logs", exist_ok=True)
+    bc = Blockchain()  # Auto-loads from file
 
-# Validate
-print("Is blockchain valid?", bc.is_valid())
+    # Add new blocks
+    transactions = [
+        "Alice sends 5 QBC to Bob",
+        "Bob sends 2 QBC to Charlie",
+        "Mining reward: 6.25 QBC",
+        "Dex trade: 1 QBC → 100 Tokens"
+    ]
+
+    for tx in transactions:
+        log(f"Adding block: {tx}")
+        bc.add_block(tx)
+        time.sleep(1)  # Simulate time passing
+
+    # Final check
+    valid = bc.is_valid()
+    log(f"Blockchain valid: {valid}")
